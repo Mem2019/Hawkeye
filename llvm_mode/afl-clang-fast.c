@@ -43,6 +43,7 @@
 static u8*  obj_path;               /* Path to runtime libraries         */
 static u8** cc_params;              /* Parameters passed to the real CC  */
 static u32  cc_par_cnt = 1;         /* Param count, including argv0      */
+static u8* pwd;
 
 
 /* Try to find the runtime libraries. If that fails, abort. */
@@ -98,6 +99,52 @@ static void find_obj(u8* argv0) {
 
 }
 
+static void parse_out(const char* out, u8** dir, u8** name) {
+  if (out == NULL)
+    FATAL("No out file path");
+
+  char* cp = strdup(out);
+
+  u8* pos = strrchr(cp, '/');
+  if (pos == NULL) {
+    *name = cp;
+    *dir = pwd;
+  }
+  else {
+    *pos = 0;
+    *name = pos + 1;
+    if (out[0] == '/')
+      *dir = alloc_printf("/%s", cp);
+    else
+      *dir = alloc_printf("%s/%s", pwd, cp);
+  }
+}
+
+static u8 is_target(u8* target_name, u8* targets) {
+
+  // "::" represent we want to treat everything as target
+  if (strcmp(targets, "::") == 0)
+    return 1;
+
+  u8* iter = ck_strdup(targets);
+
+  while (1) {
+
+    u8* p = strchr(iter, ':');
+    if (p == NULL)
+      break;
+
+    *p = 0;
+    if (strcmp(target_name, iter) == 0)
+      return 1;
+
+    iter = p + 1;
+
+  }
+
+  return strcmp(target_name, iter) == 0;
+}
+
 
 /* Copy argv to cc_params, making the necessary edits. */
 
@@ -127,22 +174,17 @@ static void edit_params(u32 argc, char** argv) {
      http://clang.llvm.org/docs/SanitizerCoverage.html#tracing-pcs-with-guards */
 
 #ifdef USE_TRACE_PC
-  cc_params[cc_par_cnt++] = "-fsanitize-coverage=trace-pc-guard";
-#ifndef __ANDROID__
-  cc_params[cc_par_cnt++] = "-mllvm";
-  cc_params[cc_par_cnt++] = "-sanitizer-coverage-block-threshold=0";
-#endif
-#else
-  cc_params[cc_par_cnt++] = "-Xclang";
-  cc_params[cc_par_cnt++] = "-load";
-  cc_params[cc_par_cnt++] = "-Xclang";
-  cc_params[cc_par_cnt++] = alloc_printf("%s/afl-llvm-pass.so", obj_path);
+#error "trace-pc mode is not supported."
 #endif /* ^USE_TRACE_PC */
 
   cc_params[cc_par_cnt++] = "-Qunused-arguments";
 
+  u8 *target_path = NULL, *target_name = NULL;
+
   while (--argc) {
     u8* cur = *(++argv);
+
+    if (!strcmp(cur, "-o")) parse_out(argv[1], &target_path, &target_name);
 
     if (!strcmp(cur, "-m32")) bit_mode = 32;
     if (!strcmp(cur, "armv7a-linux-androideabi")) bit_mode = 32;
@@ -161,6 +203,15 @@ static void edit_params(u32 argc, char** argv) {
     cc_params[cc_par_cnt++] = cur;
 
   }
+
+  if (target_path == NULL) {
+    target_path = pwd;
+    target_name = "a.out";
+  }
+
+  cc_params[cc_par_cnt++] = "-g";
+  cc_params[cc_par_cnt++] = "-flto";
+  cc_params[cc_par_cnt++] = "-fno-inline-functions";
 
   if (getenv("AFL_HARDEN")) {
 
@@ -208,8 +259,6 @@ static void edit_params(u32 argc, char** argv) {
 
   if (!getenv("AFL_DONT_OPTIMIZE")) {
 
-    cc_params[cc_par_cnt++] = "-g";
-    cc_params[cc_par_cnt++] = "-O3";
     cc_params[cc_par_cnt++] = "-funroll-loops";
 
   }
@@ -277,6 +326,24 @@ static void edit_params(u32 argc, char** argv) {
     cc_params[cc_par_cnt++] = "none";
   }
 
+  cc_params[cc_par_cnt++] = "--ld-path="AFL_REAL_LD;
+  cc_params[cc_par_cnt++] = alloc_printf(
+    "-Wl,-mllvm=-load=%s/afl-llvm-pass.so", obj_path);
+  char* targets = getenv("HAWKEYE_TARGETS");
+  if (targets != NULL && is_target(target_name, targets)) {
+
+    char* bb_targets = getenv("HAWKEYE_BB_TARGETS");
+    if (bb_targets == NULL)
+      FATAL("Please set env var 'HAWKEYE_BB_TARGETS'");
+
+    cc_params[cc_par_cnt++] = "-Wl,-plugin-opt=save-temps";
+    cc_params[cc_par_cnt++] = alloc_printf(
+      "-Wl,-mllvm=-targets=%s", bb_targets);
+
+  }
+
+
+
 #ifndef __ANDROID__
   switch (bit_mode) {
 
@@ -343,6 +410,9 @@ int main(int argc, char** argv) {
 
   }
 
+  pwd = getenv("PWD");
+  if (pwd == NULL)
+    FATAL("$PWD is not set");
 
 #ifndef __ANDROID__
   find_obj(argv[0]);

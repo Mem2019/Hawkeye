@@ -38,14 +38,40 @@
 #include <stdlib.h>
 #include <unistd.h>
 
+#include <vector>
+#include <unordered_map>
+#include <unordered_set>
+#include <fstream>
+
+#include <boost/graph/adjacency_list.hpp>
+#include <boost/graph/graph_traits.hpp>
+#include <boost/graph/dijkstra_shortest_paths.hpp>
+namespace bo = boost;
+
 #include "llvm/ADT/Statistic.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Transforms/IPO/PassManagerBuilder.h"
+#include "llvm/Support/CommandLine.h"
+
+#if defined(LLVM34)
+#include "llvm/DebugInfo.h"
+#else
+#include "llvm/IR/DebugInfo.h"
+#endif
+
+#if defined(LLVM34) || defined(LLVM35) || defined(LLVM36)
+#define LLVM_OLD_DEBUG_API
+#endif
 
 using namespace llvm;
+
+cl::opt<std::string> TargetsFile(
+    "targets",
+    cl::desc("Input file containing the target lines of code."),
+    cl::value_desc("targets"));
 
 namespace {
 
@@ -69,6 +95,186 @@ namespace {
 
 char AFLCoverage::ID = 0;
 
+namespace {
+
+using Weight = double;
+using Property = bo::property<bo::edge_weight_t, Weight>;
+using Graph = bo::adjacency_list<
+  bo::vecS, bo::vecS, bo::directedS, bo::no_property,
+  Property>;
+using Vertex = bo::graph_traits<Graph>::vertex_descriptor;
+using Edge = std::pair<Vertex, Vertex>;
+
+bool isBlacklisted(const Function *F) {
+
+  static const SmallVector<std::string, 8> Blacklist = {
+    "asan.",
+    "__asan",
+    "llvm.",
+    "sancov.",
+    "__ubsan_handle_",
+    "free",
+    "malloc",
+    "calloc",
+    "realloc"
+  };
+
+  for (auto const &BlacklistFunc : Blacklist) {
+    if (F->getName().startswith(BlacklistFunc)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+void getDebugLoc(const Instruction *I, std::string &Filename,
+                        unsigned &Line) {
+#ifdef LLVM_OLD_DEBUG_API
+  DebugLoc Loc = I->getDebugLoc();
+  if (!Loc.isUnknown()) {
+    DILocation cDILoc(Loc.getAsMDNode(M.getContext()));
+    DILocation oDILoc = cDILoc.getOrigLocation();
+
+    Line = oDILoc.getLineNumber();
+    Filename = oDILoc.getFilename().str();
+
+    if (filename.empty()) {
+      Line = cDILoc.getLineNumber();
+      Filename = cDILoc.getFilename().str();
+    }
+  }
+#else
+  if (DILocation *Loc = I->getDebugLoc()) {
+    Line = Loc->getLine();
+    Filename = Loc->getFilename().str();
+
+    if (Filename.empty()) {
+      DILocation *oDILoc = Loc->getInlinedAt();
+      if (oDILoc) {
+        Line = oDILoc->getLine();
+        Filename = oDILoc->getFilename().str();
+      }
+    }
+  }
+#endif /* LLVM_OLD_DEBUG_API */
+}
+
+/*
+Given function f, we get all outgoing edges with weight according to its CFG.
+We should note same callee function can appear in different call sites.
+*/
+std::unordered_map<Function*, Weight> getOutEdges(Function& F) {
+
+  using namespace std;
+
+  // TODO: call edges of Hawkeye
+
+  return {};
+}
+
+/* Obtain Call graph with weight, which is obtained using getOutEdges. */
+std::tuple<Graph, std::vector<Function*>, std::unordered_map<Function*, Vertex>>
+  getCallGraph(Module& M) {
+
+  using namespace std;
+  vector<Function*> functions;
+  unordered_map<Function*, Vertex> func_to_id;
+  for (auto& F : M) {
+
+    if (isBlacklisted(&F) || F.begin() == F.end())
+      continue;
+
+    func_to_id.emplace(&F, functions.size());
+    functions.push_back(&F);
+
+  }
+
+  vector<Edge> edges; vector<Weight> weights;
+  for (const auto& func_id : func_to_id) {
+
+    auto out_edges = getOutEdges(*func_id.first);
+    for (const auto& edge : out_edges) {
+
+      // Inverse the edge.
+      edges.emplace_back(func_to_id.find(edge.first)->second, func_id.second);
+      weights.push_back(edge.second);
+
+    }
+
+  }
+
+  return make_tuple<Graph, vector<Function*>, unordered_map<Function*, Vertex>>(
+    Graph(edges.begin(), edges.end(), weights.begin(), functions.size()),
+    std::move(functions), std::move(func_to_id));
+
+}
+
+std::unordered_set<std::string> parseTargets(void) {
+  using namespace std;
+  unordered_set<string> targets;
+  if (TargetsFile.empty())
+    return targets;
+  ifstream targetsfile(TargetsFile); assert(targetsfile.is_open());
+  string line;
+  while (getline(targetsfile, line)) {
+    size_t found = line.find_last_of("/\\");
+    if (found != string::npos)
+      line = line.substr(found + 1);
+    targets.insert(line);
+  }
+  targetsfile.close();
+  return targets;
+}
+
+/*
+We identify and record each target Block, and Function that contains them.
+We also decide the order of targets in this function.
+*/
+std::vector<std::pair<BasicBlock*, Function*>> getTargetBlocks(Module& M) {
+
+  using namespace std;
+
+  vector<pair<BasicBlock*, Function*>> ret;
+  auto targets = parseTargets();
+  for (auto& F : M) {
+
+    if (isBlacklisted(&F))
+      continue;
+
+    for (auto& BB : F) {
+
+      for (auto& I : BB) {
+
+        string filename; unsigned line = 0;
+        getDebugLoc(&I, filename, line);
+        static const string Xlibs("/usr/");
+        if (filename.empty() || line == 0 ||
+          !filename.compare(0, Xlibs.size(), Xlibs))
+          continue;
+
+        size_t found = filename.find_last_of("/\\");
+        if (found != string::npos)
+          filename = filename.substr(found + 1);
+
+        // If instructin debug info is target, we mark the BasicBlock as target.
+        if (targets.count(filename + ':' + to_string(line)) > 0) {
+          ret.emplace_back(&BB, &F);
+          break; // We only append each BasicBlock once.
+        }
+
+      }
+
+    }
+
+  }
+
+  return ret;
+}
+
+// TODO: getDists()
+
+}
 
 bool AFLCoverage::runOnModule(Module &M) {
 
@@ -185,8 +391,8 @@ static void registerAFLPass(const PassManagerBuilder &,
 }
 
 
-static RegisterStandardPasses RegisterAFLPass(
-    PassManagerBuilder::EP_ModuleOptimizerEarly, registerAFLPass);
+static RegisterStandardPasses RegisterAFLPassLTO(
+    PassManagerBuilder::EP_FullLinkTimeOptimizationLast, registerAFLPass);
 
 static RegisterStandardPasses RegisterAFLPass0(
     PassManagerBuilder::EP_EnabledOnOptLevel0, registerAFLPass);
