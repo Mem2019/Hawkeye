@@ -399,7 +399,10 @@ std::tuple<Graph,
 }
 
 
-std::tuple<std::unordered_map<BasicBlock*, double>, std::vector<Function*>, size_t>
+std::tuple<
+  std::unordered_map<BasicBlock*, double>,
+  std::vector<Function*>,
+  std::vector<double>>
   calcDists(Module& M,
   const std::unordered_set<BasicBlock*>& target_blocks,
   const std::unordered_set<Function*>& target_funcs) {
@@ -505,14 +508,17 @@ std::tuple<std::unordered_map<BasicBlock*, double>, std::vector<Function*>, size
   }
 
   std::vector<Function*> ordered;
-  for (const auto& f : d_f)
+  std::vector<double> ret_dists;
+  for (const auto& f : d_f) {
     ordered.push_back(f.first);
+    ret_dists.push_back(f.second);
+  }
   for (Function* F : functions)
     if (d_f.count(F) == 0)
       ordered.push_back(F);
   assert(ordered.size() == num_functions);
 
-  return make_tuple(std::move(d_b), std::move(ordered), d_f.size());
+  return make_tuple(std::move(d_b), std::move(ordered), std::move(ret_dists));
 }
 
 }
@@ -611,8 +617,8 @@ bool AFLCoverage::runOnModule(Module &M) {
   auto targets = getTargets(M);
   std::unordered_map<BasicBlock*, double> block_dist;
   std::vector<Function*> funcs;
-  size_t num_closures;
-  std::tie(block_dist, funcs, num_closures) =
+  std::vector<double> func_dist;
+  std::tie(block_dist, funcs, func_dist) =
     calcDists(M, targets.first, targets.second);
   size_t num_funcs = funcs.size();
 
@@ -639,18 +645,22 @@ bool AFLCoverage::runOnModule(Module &M) {
     ConstantInt::get(Int64Ty, num_funcs), "__hawkeye_num_funcs");
 
   char buf[64];
-  int r = snprintf(buf, sizeof(buf), NUM_CLOS_SIG"%lu", num_closures);
+  int r = snprintf(buf, sizeof(buf), NUM_FUNCS_SIG"%lu", num_funcs);
   if (r <= 0 || r >= sizeof(buf))
     FATAL("snprintf error");
   new GlobalVariable(M, ArrayType::get(Int8Ty, r + 1),
-    true, GlobalValue::ExternalLinkage,
-    ConstantDataArray::getString(C, buf), "__hawkeye_num_closures_str");
-  r = snprintf(buf, sizeof(buf), NUM_FUNCS_SIG"%lu", num_funcs);
-  if (r <= 0 || r >= sizeof(buf))
-    FATAL("snprintf error");
-  new GlobalVariable(M, ArrayType::get(Int8Ty, r + 1),
-    true, GlobalValue::ExternalLinkage,
+    true, GlobalValue::PrivateLinkage,
     ConstantDataArray::getString(C, buf), "__hawkeye_num_funcs_str");
+
+  std::ostringstream oss;
+  for (double d : func_dist)
+    oss << d << ' ';
+  std::string dists_str = FUNC_DISTS_SIG + oss.str();
+
+  new GlobalVariable(M, ArrayType::get(Int8Ty, dists_str.size() + 1),
+    true, GlobalValue::PrivateLinkage,
+    ConstantDataArray::getString(C, dists_str.c_str()),
+    "__hawkeye_func_dists_str");
 
   /* Say something nice. */
 

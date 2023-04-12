@@ -290,7 +290,7 @@
 
 #define PERSIST_SIG         "##SIG_AFL_PERSISTENT##"
 #define DEFER_SIG           "##SIG_AFL_DEFER_FORKSRV##"
-#define NUM_CLOS_SIG        "##SIG_HAWKEYE_NUM_CLOSURES##="
+#define FUNC_DISTS_SIG      "##SIG_HAWKEYE_FUNC_DISTS##="
 #define NUM_FUNCS_SIG       "##SIG_HAWKEYE_NUM_FUNCS##="
 
 /* Distinctive bitmap signature used to indicate failed execution: */

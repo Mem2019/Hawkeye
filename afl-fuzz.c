@@ -56,6 +56,7 @@
 #include <termios.h>
 #include <dlfcn.h>
 #include <sched.h>
+#include <math.h>
 
 #include <sys/wait.h>
 #include <sys/time.h>
@@ -146,6 +147,7 @@ static s32 forksrv_pid,               /* PID of the fork server           */
            out_dir_fd = -1;           /* FD of the lock file              */
 
 EXP_ST u8* trace_bits;                /* SHM with instrumentation bitmap  */
+EXP_ST he_t* trace_he;                /* SHM to track distance            */
 
 EXP_ST u8  virgin_bits[MAP_SIZE],     /* Regions yet untouched by fuzzing */
            virgin_tmout[MAP_SIZE],    /* Bits we haven't seen in tmouts   */
@@ -153,7 +155,7 @@ EXP_ST u8  virgin_bits[MAP_SIZE],     /* Regions yet untouched by fuzzing */
 
 static u8  var_bytes[MAP_SIZE];       /* Bytes that appear to be variable */
 
-static s32 shm_id;                    /* ID of the SHM region             */
+static s32 shm_id, he_id;             /* ID of the SHM region             */
 
 static volatile u8 stop_soon,         /* Ctrl-C pressed?                  */
                    clear_screen = 1,  /* Window resized?                  */
@@ -227,6 +229,11 @@ static u64 total_bitmap_size,         /* Total bit count for all bitmaps  */
 
 static s32 cpu_core_count;            /* CPU core count                   */
 
+static u64 num_closures, num_funcs;   /* Number of closures and functions */
+static double* func_dists;            /* Map function ID to CG distance   */
+
+static double min_dist, max_dist, max_sim, min_sim;
+
 #ifdef HAVE_AFFINITY
 
 static s32 cpu_aff = -1;       	      /* Selected CPU core                */
@@ -258,6 +265,8 @@ struct queue_entry {
 
   u8* trace_mini;                     /* Trace bytes, if kept             */
   u32 tc_ref;                         /* Trace bytes ref count            */
+
+  double distance, similarity;
 
   struct queue_entry *next,           /* Next element, if any             */
                      *next_100;       /* 100 elements ahead               */
@@ -1213,6 +1222,7 @@ static inline void classify_counts(u32* mem) {
 static void remove_shm(void) {
 
   shmctl(shm_id, IPC_RMID, NULL);
+  shmctl(he_id, IPC_RMID, NULL);
 
 }
 
@@ -1234,6 +1244,36 @@ static void minimize_bits(u8* dst, u8* src) {
 
 }
 
+/*
+When a new seed is added, we need to calculate its distance and similarity,
+which are used to update global information (min/max),
+and finally we calculate its power factor accordingly.
+*/
+static void update_hawkeye(struct queue_entry* q) {
+
+  q->distance = (double)trace_he->dist_sum / trace_he->count;
+
+  double sum = 0;
+  for (size_t i = 0; i < num_closures; ++i) {
+
+    if (trace_he->funcs[i]) // Iterate all intersection
+      sum += 1 / func_dists[i];
+
+  }
+
+  size_t union_count = num_closures;
+  for (size_t i = num_closures; i < num_funcs; ++i)
+    if (trace_he->funcs[i])
+      ++union_count;
+
+  q->similarity = sum / union_count;
+
+  if (q->distance < min_dist) min_dist = q->distance;
+  if (q->distance > max_dist) max_dist = q->distance;
+  if (q->similarity < min_sim) min_sim = q->similarity;
+  if (q->similarity > max_sim) max_sim = q->similarity;
+
+}
 
 /* When we bump into a new path, we call this to see if the path appears
    more "favorable" than any of the existing ones. The purpose of the
@@ -1348,6 +1388,27 @@ static void cull_queue(void) {
 
 }
 
+EXP_ST void setup_hawkeye(void) {
+
+  u8* he_str;
+
+  he_id = shmget(
+    IPC_PRIVATE, sizeof(he_t) + num_funcs, IPC_CREAT | IPC_EXCL | 0600);
+  if (he_id < 0) PFATAL("shmget() failed");
+
+  he_str = alloc_printf("%d", he_id);
+
+  if (!dumb_mode) setenv(SHM_HE_ENV_VAR, he_str, 1);
+
+  ck_free(he_str);
+
+  trace_he = shmat(he_id, NULL, 0);
+  if (trace_he == (void *)-1) PFATAL("shmat() failed");
+
+  max_sim = max_dist = -INFINITY;
+  min_sim = min_dist = INFINITY;
+
+}
 
 /* Configure shared memory and virgin_bits. This is called at startup. */
 
@@ -2286,6 +2347,8 @@ static u8 run_target(char** argv, u32 timeout) {
      territory. */
 
   memset(trace_bits, 0, MAP_SIZE);
+  memset(trace_he->funcs, 0, num_funcs);
+  trace_he->count = 0; trace_he->dist_sum = 0;
   MEM_BARRIER();
 
   /* If we're running in "dumb" mode, we can't rely on the fork server
@@ -2666,6 +2729,7 @@ static u8 calibrate_case(char** argv, struct queue_entry* q, u8* use_mem,
   total_bitmap_entries++;
 
   update_bitmap_score(q);
+  update_hawkeye(q);
 
   /* If this case didn't result in new output from the instrumentation, tell
      parent. This is a non-critical problem, but something to warn the user
@@ -4788,7 +4852,10 @@ static u32 calculate_score(struct queue_entry* q) {
 
   if (perf_score > HAVOC_MAX_MULT * 100) perf_score = HAVOC_MAX_MULT * 100;
 
-  return perf_score;
+  double power_factor = ((q->similarity - min_sim) / (max_sim - min_sim)) *
+    (1 - (q->distance - min_dist) / (max_dist - min_dist));
+
+  return perf_score * power_factor;
 
 }
 
@@ -7014,6 +7081,33 @@ EXP_ST void check_binary(u8* fname) {
 
   }
 
+  const char* fd_str = memmem(
+    f_data, f_len, FUNC_DISTS_SIG, strlen(FUNC_DISTS_SIG));
+  const char* nf_str = memmem(
+    f_data, f_len, NUM_FUNCS_SIG, strlen(NUM_FUNCS_SIG));
+
+  if (!fd_str || !nf_str)
+    FATAL("Binary is not compiled from Hawkeye compiler.");
+
+  num_funcs = strtoull(nf_str + strlen(NUM_FUNCS_SIG), NULL, 10);
+  const u8* dists = fd_str + strlen(FUNC_DISTS_SIG);
+  num_closures = 0;
+  for (const u8* p = dists; *p; ++p)
+    if (*p == ' ') num_closures++; // Format of distance is "1.1 2.2 3.3 "
+
+  // Parse function distances
+  func_dists = ck_alloc_nozero(num_closures * sizeof(double));
+  char* endptr;
+  for (size_t i = 0; i < num_closures; ++i) {
+    func_dists[i] = strtod(dists, &endptr);
+    if (*endptr != ' ')
+      FATAL("Distance String Format Error");
+    dists = endptr + 1;
+  }
+  if (*dists != '\0') FATAL("Distance String Format Error");
+
+  OKF("Number of closures and functions is %llu and %llu", num_closures, num_funcs);
+
   if (munmap(f_data, f_len)) PFATAL("unmap() failed");
 
 }
@@ -8023,6 +8117,7 @@ int main(int argc, char** argv) {
   if (!out_file) setup_stdio_file();
 
   check_binary(argv[optind]);
+  setup_hawkeye();
 
   start_time = get_cur_time();
 
