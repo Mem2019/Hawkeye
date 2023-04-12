@@ -91,4 +91,12 @@ typedef int64_t  s64;
 #define likely(_x)   __builtin_expect(!!(_x), 1)
 #define unlikely(_x)  __builtin_expect(!!(_x), 0)
 
+typedef struct _he_t {
+
+  u64 dist_sum;
+  u64 count;
+  u8 funcs[];
+
+} he_t;
+
 #endif /* ! _HAVE_TYPES_H */

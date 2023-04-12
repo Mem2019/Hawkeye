@@ -277,6 +277,7 @@
 /* Environment variable used to pass SHM ID to the called program. */
 
 #define SHM_ENV_VAR         "__AFL_SHM_ID"
+#define SHM_HE_ENV_VAR      "__HE_SHM_ID"
 
 /* Other less interesting, internal-only variables. */
 
@@ -289,6 +290,8 @@
 
 #define PERSIST_SIG         "##SIG_AFL_PERSISTENT##"
 #define DEFER_SIG           "##SIG_AFL_DEFER_FORKSRV##"
+#define NUM_CLOS_SIG        "##SIG_HAWKEYE_NUM_CLOSURES##="
+#define NUM_FUNCS_SIG       "##SIG_HAWKEYE_NUM_FUNCS##="
 
 /* Distinctive bitmap signature used to indicate failed execution: */
 

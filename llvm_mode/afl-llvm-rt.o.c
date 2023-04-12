@@ -60,6 +60,12 @@
 u8  __afl_area_initial[MAP_SIZE];
 u8* __afl_area_ptr = __afl_area_initial;
 
+extern const u32 __hawkeye_num_funcs;
+
+he_t* __he_area_ptr;
+he_t* __he_area_ptr_bak;
+he_t* __he_area_ptr_shm;
+
 __thread u32 __afl_prev_loc;
 
 
@@ -68,15 +74,41 @@ __thread u32 __afl_prev_loc;
 static u8 is_persistent;
 
 
+static inline void* my_mmap(size_t size) {
+  const size_t kPageSize = sysconf(_SC_PAGESIZE);
+  size = ((size + kPageSize - 1) / kPageSize) * kPageSize;
+  return mmap(NULL, size,
+    PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+}
+
+static inline void switch_to_shm(void) {
+
+  __he_area_ptr = __he_area_ptr_shm;
+
+}
+
+
 /* SHM setup. */
 
 static void __afl_map_shm(void) {
 
   u8 *id_str = getenv(SHM_ENV_VAR);
+  u8 *he_str = getenv(SHM_HE_ENV_VAR);
 
   /* If we're running under AFL, attach to the appropriate region, replacing the
      early-stage __afl_area_initial region that is needed to allow some really
      hacky .init code to work correctly in projects such as OpenSSL. */
+
+  if (he_str) {
+
+    __he_area_ptr_shm = shmat(atoi(he_str), NULL, 0);
+    if (__he_area_ptr_shm == (void *)-1) _exit(1);
+
+  } else {
+
+    __he_area_ptr_shm = __he_area_ptr_bak;
+
+  }
 
   if (id_str) {
 
@@ -143,6 +175,11 @@ static void __afl_start_forkserver(void) {
 
         close(FORKSRV_FD);
         close(FORKSRV_FD + 1);
+
+        // if not persistent mode, we need to switch to shared memory
+        if (!is_persistent)
+          switch_to_shm();
+
         return;
   
       }
@@ -198,6 +235,7 @@ int __afl_persistent_loop(unsigned int max_cnt) {
       memset(__afl_area_ptr, 0, MAP_SIZE);
       __afl_area_ptr[0] = 1;
       __afl_prev_loc = 0;
+      switch_to_shm();
     }
 
     cycle_cnt  = max_cnt;
@@ -215,6 +253,7 @@ int __afl_persistent_loop(unsigned int max_cnt) {
       __afl_area_ptr[0] = 1;
       __afl_prev_loc = 0;
 
+      switch_to_shm();
       return 1;
 
     } else {
@@ -224,6 +263,7 @@ int __afl_persistent_loop(unsigned int max_cnt) {
          dummy output region. */
 
       __afl_area_ptr = __afl_area_initial;
+      __he_area_ptr = __he_area_ptr_bak;
 
     }
 
@@ -257,6 +297,9 @@ void __afl_manual_init(void) {
 __attribute__((constructor(CONST_PRIO))) void __afl_auto_init(void) {
 
   is_persistent = !!getenv(PERSIST_ENV_VAR);
+
+  __he_area_ptr_bak = __he_area_ptr =
+    my_mmap(sizeof(he_t) + sizeof(__hawkeye_num_funcs));
 
   if (getenv(DEFER_ENV_VAR)) return;
 
@@ -310,5 +353,19 @@ void __sanitizer_cov_trace_pc_guard_init(uint32_t* start, uint32_t* stop) {
     start++;
 
   }
+
+}
+
+void hawkeye_dist_inst(u64 dist) {
+
+  __he_area_ptr->dist_sum += dist;
+  __he_area_ptr->count++;
+
+}
+
+
+void hawkeye_func_inst(u64 func) {
+
+  __he_area_ptr->funcs[func] = 1;
 
 }
