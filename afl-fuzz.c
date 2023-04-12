@@ -44,6 +44,7 @@
 #include "hash.h"
 
 #include <stdio.h>
+#include <stdbool.h>
 #include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
@@ -134,7 +135,8 @@ EXP_ST u8  skip_deterministic,        /* Skip deterministic stages?       */
            run_over10m,               /* Run time over 10 minutes?        */
            persistent_mode,           /* Running in persistent mode?      */
            deferred_mode,             /* Deferred forkserver mode?        */
-           fast_cal;                  /* Try to calibrate faster?         */
+           fast_cal,                  /* Try to calibrate faster?         */
+           old_queue;                 /* Use old queue scheduling         */
 
 static s32 out_fd,                    /* Persistent fd for out_file       */
            dev_urandom_fd = -1,       /* Persistent fd for /dev/urandom   */
@@ -229,7 +231,8 @@ static u64 total_bitmap_size,         /* Total bit count for all bitmaps  */
 
 static s32 cpu_core_count;            /* CPU core count                   */
 
-static u64 num_closures, num_funcs;   /* Number of closures and functions */
+static u64 num_t_funcs, num_closures, num_funcs;
+/* Number of closures and functions */
 static double* func_dists;            /* Map function ID to CG distance   */
 
 static double min_dist, max_dist, max_sim, min_sim;
@@ -246,6 +249,7 @@ struct queue_entry {
 
   u8* fname;                          /* File name for the test case      */
   u32 len;                            /* Input length                     */
+  u32 id;                             /* ID of the seed                   */
 
   u8  cal_failed,                     /* Calibration failed?              */
       trim_done,                      /* Trimmed?                         */
@@ -271,12 +275,17 @@ struct queue_entry {
   struct queue_entry *next,           /* Next element, if any             */
                      *next_100;       /* 100 elements ahead               */
 
+  struct queue_entry* next_pq;        /* Next used for priority queue     */
+
 };
 
 static struct queue_entry *queue,     /* Fuzzing queue (linked list)      */
                           *queue_cur, /* Current offset within the queue  */
                           *queue_top, /* Top of the list                  */
                           *q_prev100; /* Previous 100 marker              */
+
+static struct queue_entry* pri_queue[3] = {NULL, NULL, NULL};
+static struct queue_entry* pri_queue_last[3] = {NULL, NULL, NULL};
 
 static struct queue_entry*
   top_rated[MAP_SIZE];                /* Top entries for bitmap bytes     */
@@ -812,7 +821,7 @@ static void add_to_queue(u8* fname, u32 len, u8 passed_det) {
 
   } else q_prev100 = queue = queue_top = q;
 
-  queued_paths++;
+  q->id = queued_paths++;
   pending_not_fuzzed++;
 
   cycles_wo_finds = 0;
@@ -1241,6 +1250,83 @@ static void minimize_bits(u8* dst, u8* src) {
     i++;
 
   }
+
+}
+
+/* Calculate power factor of a given seed */
+
+static inline double power_factor(struct queue_entry* q) {
+
+  return ((q->similarity - min_sim) / (max_sim - min_sim)) *
+    (1 - (q->distance - min_dist) / (max_dist - min_dist));
+
+}
+
+/* Push given seed into corresponding priority queue */
+
+static void push_pq(u8 level, struct queue_entry* q) {
+
+  q->next_pq = NULL;
+
+  if (pri_queue_last[level] == NULL) {
+
+    if (pri_queue[level]) FATAL("Corrupted PQ");
+
+    pri_queue[level] = q;
+    pri_queue_last[level] = q;
+
+  } else {
+
+    if (pri_queue_last[level]->next_pq) FATAL("Corrupted PQ");
+
+    pri_queue_last[level]->next_pq = q;
+    pri_queue_last[level] = q;
+
+  }
+
+}
+
+static struct queue_entry* pop_pq(void) {
+
+  for (u8 i = 0; i < 3; ++i) {
+
+    // Find first non-empty queue
+    if (pri_queue[i] == NULL)
+      continue;
+
+    // Pop first element from queue
+    struct queue_entry* ret = pri_queue[i];
+    pri_queue[i] = ret->next_pq;
+    if (pri_queue[i] == NULL) {
+      // If last element is removed, we do some check and clear last.
+      if (pri_queue_last[i] != ret) FATAL("Corrupted PQ");
+      pri_queue_last[i] = NULL;
+    }
+
+    return ret;
+
+  }
+
+  return NULL;
+
+}
+
+/*
+When a new seed is added,
+we try to add it into the priority queue according to how it behaves.
+*/
+static void update_priority_queue(struct queue_entry* q) {
+
+  bool cover_targets = false;
+  for (size_t i = 0; i < num_t_funcs; ++i)
+    if (trace_he->funcs[i])
+      cover_targets = true;
+
+  if (q->has_new_cov || cover_targets ||
+      power_factor(q) > 0.5/*This value is not showed in paper*/)
+    push_pq(0, q);
+  else
+    push_pq(1, q);
 
 }
 
@@ -2743,6 +2829,8 @@ abort_calibration:
     q->has_new_cov = 1;
     queued_with_cov++;
   }
+
+  update_priority_queue(q);
 
   /* Mark variable paths. */
 
@@ -4852,10 +4940,7 @@ static u32 calculate_score(struct queue_entry* q) {
 
   if (perf_score > HAVOC_MAX_MULT * 100) perf_score = HAVOC_MAX_MULT * 100;
 
-  double power_factor = ((q->similarity - min_sim) / (max_sim - min_sim)) *
-    (1 - (q->distance - min_dist) / (max_dist - min_dist));
-
-  return perf_score * power_factor;
+  return perf_score * power_factor(q);
 
 }
 
@@ -7085,11 +7170,14 @@ EXP_ST void check_binary(u8* fname) {
     f_data, f_len, FUNC_DISTS_SIG, strlen(FUNC_DISTS_SIG));
   const char* nf_str = memmem(
     f_data, f_len, NUM_FUNCS_SIG, strlen(NUM_FUNCS_SIG));
+  const char* nt_str = memmem(
+    f_data, f_len, NUM_T_FUNCS_SIG, strlen(NUM_T_FUNCS_SIG));
 
-  if (!fd_str || !nf_str)
+  if (!fd_str || !nf_str || !nt_str)
     FATAL("Binary is not compiled from Hawkeye compiler.");
 
   num_funcs = strtoull(nf_str + strlen(NUM_FUNCS_SIG), NULL, 10);
+  num_t_funcs = strtoull(nt_str + strlen(NUM_T_FUNCS_SIG), NULL, 10);
   const u8* dists = fd_str + strlen(FUNC_DISTS_SIG);
   num_closures = 0;
   for (const u8* p = dists; *p; ++p)
@@ -7106,7 +7194,9 @@ EXP_ST void check_binary(u8* fname) {
   }
   if (*dists != '\0') FATAL("Distance String Format Error");
 
-  OKF("Number of closures and functions is %llu and %llu", num_closures, num_funcs);
+  OKF("Number of target functions, closures and functions is "
+    "%llu, %llu and %llu respectively",
+    num_t_funcs, num_closures, num_funcs);
 
   if (munmap(f_data, f_len)) PFATAL("unmap() failed");
 
@@ -8066,6 +8156,7 @@ int main(int argc, char** argv) {
   if (getenv("AFL_NO_ARITH"))      no_arith         = 1;
   if (getenv("AFL_SHUFFLE_QUEUE")) shuffle_queue    = 1;
   if (getenv("AFL_FAST_CAL"))      fast_cal         = 1;
+  if (getenv("AFL_OLD_QUEUE"))     old_queue        = 1;
 
   if (getenv("AFL_HANG_TMOUT")) {
     hang_tmout = atoi(getenv("AFL_HANG_TMOUT"));
@@ -8156,14 +8247,24 @@ int main(int argc, char** argv) {
     if (!queue_cur) {
 
       queue_cycle++;
-      current_entry     = 0;
       cur_skipped_paths = 0;
-      queue_cur         = queue;
 
-      while (seek_to) {
-        current_entry++;
-        seek_to--;
-        queue_cur = queue_cur->next;
+      if (old_queue) {
+
+        current_entry = 0;
+        queue_cur = queue;
+
+        while (seek_to) {
+          current_entry++;
+          seek_to--;
+          queue_cur = queue_cur->next;
+        }
+
+      } else {
+
+        queue_cur = pop_pq();
+        current_entry = queue_cur->id;
+
       }
 
       show_stats();
@@ -8202,8 +8303,16 @@ int main(int argc, char** argv) {
 
     if (stop_soon) break;
 
-    queue_cur = queue_cur->next;
-    current_entry++;
+    if (old_queue) {
+      queue_cur = queue_cur->next;
+      current_entry++;
+    } else {
+      // One problem is that the cycle count will always be zero,
+      // since paper does not mention this, we just leave it this way.
+      push_pq(2, queue_cur);
+      queue_cur = pop_pq();
+      current_entry = queue_cur->id;
+    }
 
   }
 

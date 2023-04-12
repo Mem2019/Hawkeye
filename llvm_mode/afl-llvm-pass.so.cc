@@ -507,12 +507,23 @@ std::tuple<
 
   }
 
+  // We create an array of functions:
+  // first section [0...num_targets) is target functions;
+  // second section [num_targets...num_closures) is functions with distance;
+  // third section [num_closures...num_funcs) is other functions.
   std::vector<Function*> ordered;
   std::vector<double> ret_dists;
+  for (Function* TF : target_funcs) {
+    ordered.push_back(TF);
+    ret_dists.push_back(d_f.find(TF)->second);
+  }
   for (const auto& f : d_f) {
+    if (target_funcs.count(f.first) > 0)
+      continue;
     ordered.push_back(f.first);
     ret_dists.push_back(f.second);
   }
+  assert(ordered.size() == d_f.size());
   for (Function* F : functions)
     if (d_f.count(F) == 0)
       ordered.push_back(F);
@@ -651,6 +662,13 @@ bool AFLCoverage::runOnModule(Module &M) {
   new GlobalVariable(M, ArrayType::get(Int8Ty, r + 1),
     true, GlobalValue::PrivateLinkage,
     ConstantDataArray::getString(C, buf), "__hawkeye_num_funcs_str");
+
+  r = snprintf(buf, sizeof(buf), NUM_T_FUNCS_SIG"%lu", targets.second.size());
+  if (r <= 0 || r >= sizeof(buf))
+    FATAL("snprintf error");
+  new GlobalVariable(M, ArrayType::get(Int8Ty, r + 1),
+    true, GlobalValue::PrivateLinkage,
+    ConstantDataArray::getString(C, buf), "__hawkeye_num_t_funcs_str");
 
   std::ostringstream oss;
   for (double d : func_dist)

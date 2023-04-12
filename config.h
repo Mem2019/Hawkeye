@@ -292,6 +292,7 @@
 #define DEFER_SIG           "##SIG_AFL_DEFER_FORKSRV##"
 #define FUNC_DISTS_SIG      "##SIG_HAWKEYE_FUNC_DISTS##="
 #define NUM_FUNCS_SIG       "##SIG_HAWKEYE_NUM_FUNCS##="
+#define NUM_T_FUNCS_SIG     "##SIG_HAWKEYE_NUM_T_FUNCS##="
 
 /* Distinctive bitmap signature used to indicate failed execution: */
 
