@@ -1286,6 +1286,8 @@ static void push_pq(u8 level, struct queue_entry* q) {
 
 }
 
+/* Pop the next priorized element */
+
 static struct queue_entry* pop_pq(void) {
 
   for (u8 i = 0; i < 3; ++i) {
@@ -1307,6 +1309,17 @@ static struct queue_entry* pop_pq(void) {
 
   }
 
+  return NULL;
+
+}
+
+/* Peek the next element to be fetched without actually popping it. */
+
+static struct queue_entry* peek_pq(void) {
+
+  for (u8 i = 0; i < 3; ++i)
+    if (pri_queue[i])
+      return pri_queue[i];
   return NULL;
 
 }
@@ -8238,6 +8251,8 @@ int main(int argc, char** argv) {
     if (stop_soon) goto stop_fuzzing;
   }
 
+  struct queue_entry* first_elem = NULL;
+
   while (1) {
 
     u8 skipped_fuzz;
@@ -8262,7 +8277,7 @@ int main(int argc, char** argv) {
 
       } else {
 
-        queue_cur = pop_pq();
+        first_elem = queue_cur = pop_pq();
         current_entry = queue_cur->id;
 
       }
@@ -8307,11 +8322,18 @@ int main(int argc, char** argv) {
       queue_cur = queue_cur->next;
       current_entry++;
     } else {
-      // One problem is that the cycle count will always be zero,
-      // since paper does not mention this, we just leave it this way.
+
       push_pq(2, queue_cur);
-      queue_cur = pop_pq();
-      current_entry = queue_cur->id;
+
+      // If next element becomes the first element of this cycle,
+      // we can start a new cycle.
+      if (peek_pq() == first_elem) {
+        queue_cur = NULL;
+      } else {
+        queue_cur = pop_pq();
+        current_entry = queue_cur->id;
+      }
+
     }
 
   }

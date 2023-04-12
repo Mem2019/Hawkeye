@@ -366,6 +366,9 @@ void hawkeye_dist_inst(u64 dist) {
 
 void hawkeye_func_inst(u64 func) {
 
+  if (__he_area_ptr == NULL)
+    return;
+
   __he_area_ptr->funcs[func] = 1;
 
 }
