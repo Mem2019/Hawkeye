@@ -36,6 +36,10 @@ CXXFLAGS    ?= -O3 -funroll-loops
 CXXFLAGS    += -Wall -D_FORTIFY_SOURCE=2 -g -std=c++14 -Wno-pointer-sign \
                -DVERSION=\"$(VERSION)\" -Wno-variadic-macros
 
+ifdef AFLGO_DISTANCE
+	CXXFLAGS  += -DAFLGO_DISTANCE
+endif
+
 # Mark nodelete to work around unload bug in upstream LLVM 5.0+
 CLANG_CFL    = `$(LLVM_CONFIG) --cxxflags` -Wl,-znodelete -fno-rtti -fpic $(CXXFLAGS)
 CLANG_LFL    = `$(LLVM_CONFIG) --ldflags` $(LDFLAGS)

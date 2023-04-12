@@ -239,7 +239,11 @@ std::tuple<Graph, std::vector<Function*>, std::unordered_map<Function*, Vertex>>
 
       // Inverse the edge.
       edges.emplace_back(func_to_id.find(edge.first)->second, func_id.second);
+#ifdef AFLGO_DISTANCE
+      weights.push_back(1);
+#else
       weights.push_back(edge.second);
+#endif
 
     }
 
