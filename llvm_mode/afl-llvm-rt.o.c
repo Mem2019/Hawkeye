@@ -298,8 +298,7 @@ __attribute__((constructor(CONST_PRIO))) void __afl_auto_init(void) {
 
   is_persistent = !!getenv(PERSIST_ENV_VAR);
 
-  __he_area_ptr_bak = __he_area_ptr =
-    my_mmap(sizeof(he_t) + sizeof(__hawkeye_num_funcs));
+  __he_area_ptr_bak = __he_area_ptr = my_mmap(sizeof(he_t) + __hawkeye_num_funcs);
 
   if (getenv(DEFER_ENV_VAR)) return;
 
