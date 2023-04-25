@@ -265,7 +265,8 @@ struct queue_entry {
 
   u64 exec_us,                        /* Execution time (us)              */
       handicap,                       /* Number of queue cycles behind    */
-      depth;                          /* Path depth                       */
+      depth,                          /* Path depth                       */
+      fuzzed_times;                   /* Number of times being fuzzed     */
 
   u8* trace_mini;                     /* Trace bytes, if kept             */
   u32 tc_ref;                         /* Trace bytes ref count            */
@@ -4808,6 +4809,7 @@ EXP_ST u8 common_fuzz_stuff(char** argv, u8* out_buf, u32 len) {
 
   write_to_testcase(out_buf, len);
 
+  ++queue_cur->fuzzed_times;
   fault = run_target(argv, exec_tmout);
 
   if (stop_soon) return 1;
@@ -7962,6 +7964,7 @@ int main(int argc, char** argv) {
   u8  mem_limit_given = 0;
   u8  exit_1 = !!getenv("AFL_BENCH_JUST_ONE");
   char** use_argv;
+  FILE* fd;
 
   struct timeval tv;
   struct timezone tz;
@@ -8369,6 +8372,15 @@ stop_fuzzing:
            "    (For info on resuming, see %s/README.)\n", doc_path);
 
   }
+
+  u8* times_file = alloc_printf("%s/fuzzed_times.txt", out_dir);
+  fd = fopen(times_file, "w");
+  ck_free(times_file);
+  if (fd == NULL)
+    FATAL("Cannot open file to record number of fuzzed times for each seed");
+  for (struct queue_entry* q = queue; q; q = q->next)
+    fprintf(fd, "%llu\n", q->fuzzed_times);
+  fclose(fd);
 
   fclose(plot_file);
   destroy_queue();
