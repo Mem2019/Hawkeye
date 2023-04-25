@@ -357,6 +357,9 @@ void __sanitizer_cov_trace_pc_guard_init(uint32_t* start, uint32_t* stop) {
 
 void hawkeye_dist_inst(u64 dist) {
 
+  if (__he_area_ptr == NULL)
+    return;
+
   __he_area_ptr->dist_sum += dist;
   __he_area_ptr->count++;
 
