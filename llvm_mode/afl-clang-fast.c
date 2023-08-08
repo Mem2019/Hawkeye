@@ -336,7 +336,7 @@ static void edit_params(u32 argc, char** argv) {
     if (bb_targets == NULL)
       FATAL("Please set env var 'HAWKEYE_BB_TARGETS'");
 
-    cc_params[cc_par_cnt++] = "-Wl,-plugin-opt=save-temps";
+    // cc_params[cc_par_cnt++] = "-Wl,-plugin-opt=save-temps";
     cc_params[cc_par_cnt++] = alloc_printf(
       "-Wl,-mllvm=-targets=%s", bb_targets);
 

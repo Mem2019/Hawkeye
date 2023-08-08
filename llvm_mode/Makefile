@@ -44,7 +44,7 @@ endif
 CLANG_CFL    = `$(LLVM_CONFIG) --cxxflags` -Wl,-znodelete -fno-rtti -fpic $(CXXFLAGS)
 CLANG_LFL    = `$(LLVM_CONFIG) --ldflags` $(LDFLAGS)
 
-AFL_REAL_LD  = `which ld.lld`
+AFL_REAL_LD  ?= ld.lld
 
 # User teor2345 reports that this is required to make things work on MacOS X.
 
@@ -83,7 +83,7 @@ endif
 	@echo "[+] All set and ready to build."
 
 ../afl-clang-fast: afl-clang-fast.c | test_deps
-	$(CC) $(CFLAGS) -DAFL_REAL_LD="\"$(AFL_REAL_LD)\"" $< -o $@ $(LDFLAGS)
+	$(CC) $(CFLAGS) -DAFL_REAL_LD="\"$(shell which $(AFL_REAL_LD))\"" $< -o $@ $(LDFLAGS)
 	ln -sf afl-clang-fast ../afl-clang-fast++
 
 ../afl-llvm-pass.so: afl-llvm-pass.so.cc | test_deps
