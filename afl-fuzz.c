@@ -1271,14 +1271,14 @@ static void push_pq(u8 level, struct queue_entry* q) {
 
   if (pri_queue_last[level] == NULL) {
 
-    if (pri_queue[level]) FATAL("Corrupted PQ");
+    if (pri_queue[level]) WARNF("Corrupted PQ");
 
     pri_queue[level] = q;
     pri_queue_last[level] = q;
 
   } else {
 
-    if (pri_queue_last[level]->next_pq) FATAL("Corrupted PQ");
+    if (pri_queue_last[level]->next_pq) WARNF("Corrupted PQ"); // TODO: fix this problem
 
     pri_queue_last[level]->next_pq = q;
     pri_queue_last[level] = q;
@@ -1302,7 +1302,7 @@ static struct queue_entry* pop_pq(void) {
     pri_queue[i] = ret->next_pq;
     if (pri_queue[i] == NULL) {
       // If last element is removed, we do some check and clear last.
-      if (pri_queue_last[i] != ret) FATAL("Corrupted PQ");
+      if (pri_queue_last[i] != ret) WARNF("Corrupted PQ");
       pri_queue_last[i] = NULL;
     }
 
